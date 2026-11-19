@@ -1344,6 +1344,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
+name = "zahidex-client"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "zahidex-ipc",
+ "zahidex-protocol",
+]
+
+[[package]]
 name = "zahidex-ipc"
 version = "0.1.0"
 dependencies = [
@@ -1379,6 +1388,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xkbcommon",
+ "zahidex-client",
  "zahidex-ipc",
  "zahidex-protocol",
 ]

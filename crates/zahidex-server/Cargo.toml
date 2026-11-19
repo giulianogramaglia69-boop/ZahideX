@@ -20,6 +20,7 @@ path = "src/bin/zahidex-test-client.rs"
 [dependencies]
 zahidex-protocol = { path = "../zahidex-protocol" }
 zahidex-ipc = { path = "../zahidex-ipc" }
+zahidex-client = { path = "../zahidex-client" }
 smithay = { workspace = true }
 calloop = { workspace = true }
 drm = { workspace = true }

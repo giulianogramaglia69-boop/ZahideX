@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Libreria client ZahideX: connect, finestre, buffer memfd, eventi.
+
+[package]
+name = "zahidex-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Libreria client ZahideX: connessione, finestre, buffer condivisi memfd e eventi di input"
+# Il demo vive in examples/demo.rs ma viene compilato SOLO come binario
+# `zahidex-demo` (vedi [[bin]] sotto): senza questa riga cargo lo
+# scoprirebbe anche come example e lo compilerebbe due volte.
+autoexamples = false
+
+[[bin]]
+name = "zahidex-demo"
+path = "examples/demo.rs"
+
+[dependencies]
+zahidex-protocol = { path = "../zahidex-protocol" }
+zahidex-ipc = { path = "../zahidex-ipc" }
+thiserror = { workspace = true }

@@ -4,6 +4,7 @@ members = [
     "crates/zahidex-protocol",
     "crates/zahidex-ipc",
     "crates/zahidex-server",
+    "crates/zahidex-client",
 ]
 
 [workspace.package]

@@ -91,7 +91,10 @@ impl Connection {
     ///
     /// Restituisce `true` se ci sono dati da leggere con `recv`,
     /// `false` in caso di timeout. Un errore di poll o la chiusura dello
-    /// stream (`POLLHUP`/`POLLERR`) diventano `IpcError`.
+    /// stream (`POLLHUP`/`POLLERR`) diventano `IpcError` — ma solo se non
+    /// ci sono anche dati da leggere: se il peer ha inviato dati e poi ha
+    /// chiuso (`POLLIN` + `POLLHUP` insieme), i dati restano leggibili e
+    /// questa funzione restituisce `true`.
     ///
     /// Serve ai thread client per svuotare la coda dei messaggi in uscita
     /// mentre aspettano il prossimo messaggio, senza usare un timeout di
@@ -108,13 +111,19 @@ impl Connection {
             return Ok(false);
         }
         let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+        // Se ci sono dati da leggere, restituiscili anche se il peer ha già
+        // chiuso (POLLIN + POLLHUP insieme: i dati inviati prima della
+        // chiusura restano leggibili).
+        if revents.contains(PollFlags::POLLIN) {
+            return Ok(true);
+        }
         if revents.contains(PollFlags::POLLHUP)
             || revents.contains(PollFlags::POLLERR)
             || revents.contains(PollFlags::POLLNVAL)
         {
             return Err(IpcError::UnexpectedEof);
         }
-        Ok(revents.contains(PollFlags::POLLIN))
+        Ok(false)
     }
 
     /// Riceve il prossimo messaggio con gli eventuali fd allegati.

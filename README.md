@@ -19,7 +19,11 @@ Target: laptop Fedora con GPU AMD, lanciato da TTY via logind (niente root).
       drag della barra del titolo e resize dai bordi, focus per-finestra,
       scorciatoie Super+J/K/F/Q, rendering con barre del titolo e bordo
       di focus; client di test `zahidex-test-client`; 22 test nuovi)
-- [ ] Fase 5 — Client library + client demo
+- [x] **Fase 5 — Client library + client demo** (`zahidex-client`:
+      `Client`/`Window`, handshake, buffer memfd, eventi con `Pong`
+      automatico; demo `zahidex-demo` con gradiente e quadrato
+      interattivo; client di test migrato sopra la libreria; 7 test
+      di integrazione contro server finto + 1 test di disegno)
 
 ## Architettura
 
@@ -30,7 +34,7 @@ ZahideX/
 │   │                       # ClientMessage / ServerMessage, handshake, versioni, framing.
 │   ├── zahidex-ipc/        # Trasporto: Unix socket, framing, SCM_RIGHTS, buffer memfd.
 │   ├── zahidex-server/     # (Fase 2+) binario server: DRM, input, compositor, renderer.
-│   └── zahidex-client/     # (Fase 5+) libreria client + client demo.
+│   └── zahidex-client/     # (Fase 5) libreria client + client demo.
 └── README.md
 ```
 
@@ -264,6 +268,120 @@ Cosa devi vedere:
 6. Nel terminale del client vedi i messaggi che arrivano: `Configure`,
    `Focus`, `PointerEnter/Leave/Motion`, `Key` (prova a scrivere con una
    finestra focalizzata).
+
+## Fase 5 — Client library + client demo (fatta)
+
+`crates/zahidex-client/`: l'API pubblica per scrivere client ZahideX
+senza toccare il protocollo grezzo.
+
+- **`Client::connect()`** — apre il socket `$XDG_RUNTIME_DIR/zahidex-0`
+  (fallback `/tmp`), fa l'handshake con negoziazione versione e restituisce
+  la versione negoziata e la dimensione dell'output
+  (`Client::output_size()`). Varianti: `connect_as(nome)` e
+  `connect_to(percorso, nome)`. Se il server rifiuta l'handshake,
+  `ClientError::HandshakeRejected`; se non c'è nessun server,
+  `ClientError::Io` ("No such file or directory").
+- **`Client::create_window(titolo, larghezza, altezza, floating)`** —
+  crea la finestra e attende l'ack del server (`WindowCreated`); con
+  `floating = true` invia subito anche `SetFloating` e la geometria
+  finale arriva con il `Configure` successivo.
+- **`Window::commit(pixel)` / `Window::commit_with(disegna)`** — il
+  contenuto è XRGB8888, largo `width` e alto `height - TITLE_BAR_HEIGHT`
+  (la barra del titolo la disegna il server). Il buffer è un memfd creato
+  e passato via SCM_RIGHTS a ogni commit; `commit` valida la dimensione
+  dei pixel prima di inviare (`ClientError::InvalidPixels`).
+- **`Window::set_title` / `set_floating` / `request_resize` /
+  `destroy`** — gli altri messaggi del protocollo.
+- **Eventi**: `Client::poll_event(timeout)` (un evento, `None` = attesa
+  senza scadenza, `Some(Duration::ZERO)` = non bloccante) e
+  `Client::poll_events(timeout)` (tutti quelli disponibili). Il tipo è
+  `Event` (`Configure`, `Focus`, `PointerEnter/Leave/Motion/Button/Axis`,
+  `Key`, `CloseWindow`, `ServerError`). Il `Ping` del server **non arriva
+  mai all'applicazione**: la libreria risponde `Pong` da sola. Quando
+  arriva un `Configure`, la geometria della `Window` è già aggiornata
+  (`window.width()` / `window.height()`): basta ricommittare.
+- **Errori tipizzati** (`ClientError`, thiserror): niente panic su input
+  del server malformato; la chiusura del server diventa
+  `ClientError::Disconnected`.
+- Il client è **single-thread** (`Rc`/`RefCell` interni): per un altro
+  thread, apri una connessione dedicata.
+
+### Esempio minimo
+
+```rust
+use zahidex_client::{Client, Event};
+
+let mut client = Client::connect()?;
+let window = client.create_window("Ciao", 800, 600, false)?;
+// Riempie il contenuto di rosso (XRGB8888: byte B, G, R, X).
+window.commit_with(|pixels, _w, _h, _stride| {
+    for px in pixels.as_chunks_mut::<4>().0 {
+        px[0] = 0;
+        px[1] = 0;
+        px[2] = 255;
+        px[3] = 255;
+    }
+})?;
+loop {
+    for event in client.poll_events(None)? {
+        if let Event::CloseWindow { .. } = event {
+            return Ok(());
+        }
+    }
+}
+```
+
+### Il demo (`zahidex-demo`)
+
+`crates/zahidex-client/examples/demo.rs`, binario `zahidex-demo`: una
+finestra con gradiente di sfondo blu, un quadrato arancione e un pulsante
+di chiusura rosso in alto a destra.
+
+| Azione | Effetto |
+| --- | --- |
+| Frecce o WASD | Muovono il quadrato (24 px) |
+| Click sinistro | Il quadrato salta sotto il cursore |
+| Click sul pulsante rosso | Chiude la finestra ed esce |
+| Q oppure Esc | Chiude la finestra ed esce |
+| Resize dal tiling (es. Super+Q su un'altra finestra) | Il demo riceve `Configure` e ridisegna |
+
+### Provare il demo sul laptop
+
+```sh
+# 1. Compila (serve Rust 1.88+ e le librerie di sviluppo, come per il server)
+cargo build --release
+
+# 2. Su una TTY libera (Ctrl+Alt+F3), lancia il server:
+./target/release/zahidex
+
+# 3. Da un'altra TTY (o da SSH, il client non tocca il video), lancia il demo:
+./target/release/zahidex-demo
+
+# 4. Prova: frecce/WASD, click, pulsante rosso, Q.
+#    Per vedere il tiling in azione, lancia anche il client di test:
+./target/release/zahidex-test-client
+#    Le due finestre del test si affiancano al demo (master 60% + stack);
+#    Super+J/K cicla il focus, Super+F rende floating, Super+Q chiude.
+```
+
+### Note
+
+- **Bug trovato dai test e corretto in Fase 5** (`zahidex-ipc`,
+  `Connection::wait_readable`): se il peer inviava dati e chiudeva subito
+  dopo (`POLLIN` + `POLLHUP` insieme), la funzione restituiva errore
+  invece dei dati — il client perdeva l'ultimo messaggio (es. `HelloOk` o
+  `Key`). Ora `POLLIN` ha la precedenza: i dati arrivano, la chiusura si
+  vede solo al poll successivo. Il fix vale anche per il lato server.
+- Il client di test (`zahidex-test-client`, Fase 4) è stato **migrato
+  sopra `zahidex-client`**: stesso comportamento (due finestre
+  rossa/verde, ricommit su `Configure`, stampa eventi), ma niente più
+  protocollo grezzo.
+- **Test**: 7 test di integrazione contro un server finto in-process
+  (handshake ok/rifiutato, server assente, `CreateWindow`+`CommitBuffer`
+  con verifica dei pixel nel memfd, floating, `Ping`→`Pong` automatico,
+  `Key`, pixel di dimensione sbagliata) + 1 test dei pixel del demo.
+  Totale workspace: **73 test** (64 + 9 nuovi: 7 di integrazione, 1
+  doctest dell'esempio minimo, 1 dei pixel del demo).
 
 ## Protocollo v0.1
 
