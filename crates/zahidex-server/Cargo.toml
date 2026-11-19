@@ -13,6 +13,10 @@ description = "Server ZahideX: sessione libseat, DRM/KMS, renderer GLES, sfondo 
 name = "zahidex"
 path = "src/main.rs"
 
+[[bin]]
+name = "zahidex-test-client"
+path = "src/bin/zahidex-test-client.rs"
+
 [dependencies]
 zahidex-protocol = { path = "../zahidex-protocol" }
 zahidex-ipc = { path = "../zahidex-ipc" }

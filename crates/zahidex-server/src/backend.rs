@@ -33,9 +33,12 @@ use smithay::backend::{
     egl::{EGLContext, EGLDisplay},
     libinput::LibinputInputBackend,
     renderer::{
+        Color32F, ImportMem,
         element::{
             Kind,
             memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+            render_elements,
+            solid::{SolidColorBuffer, SolidColorRenderElement},
         },
         gles::GlesRenderer,
     },
@@ -49,6 +52,7 @@ use smithay::output::{Output, PhysicalProperties, Scale, Subpixel};
 use smithay::utils::{DeviceFd, Physical, Point, Size, Transform};
 use tracing::{debug, info, warn};
 
+use crate::compositor::{FramePlan, FrameWindow};
 use crate::cursor::cursor_image;
 use crate::error::ServerError;
 use crate::input::create_libinput;
@@ -61,6 +65,45 @@ pub const BACKGROUND_COLOR: [f32; 4] = [
     0x33 as f32 / 255.0,
     1.0,
 ];
+
+/// Spessore del bordo di focus (px).
+const FOCUS_BORDER_WIDTH: i32 = 2;
+
+/// Barra del titolo con focus: blu `#2563EB`.
+const TITLE_FOCUSED: Color32F = Color32F::new(
+    0x25 as f32 / 255.0,
+    0x63 as f32 / 255.0,
+    0xeb as f32 / 255.0,
+    1.0,
+);
+/// Barra del titolo senza focus: grigio-blu `#334155`.
+const TITLE_UNFOCUSED: Color32F = Color32F::new(
+    0x33 as f32 / 255.0,
+    0x41 as f32 / 255.0,
+    0x55 as f32 / 255.0,
+    1.0,
+);
+/// Bordo della finestra con focus: blu `#0A84FF`.
+const FOCUS_BORDER: Color32F = Color32F::new(
+    0x0a as f32 / 255.0,
+    0x84 as f32 / 255.0,
+    0xff as f32 / 255.0,
+    1.0,
+);
+/// Contenuto assente (finestra senza buffer): `#16283D`.
+const PLACEHOLDER: Color32F = Color32F::new(
+    0x16 as f32 / 255.0,
+    0x28 as f32 / 255.0,
+    0x3d as f32 / 255.0,
+    1.0,
+);
+
+render_elements! {
+    /// Elementi di un frame: texture da memfd oppure rettangoli pieni.
+    pub OutputRenderElements<R> where R: ImportMem;
+    Memory = MemoryRenderBufferRenderElement<R>,
+    Solid = SolidColorRenderElement,
+}
 
 /// Formati colore provati in ordine per lo swapchain del primary plane.
 const COLOR_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
@@ -202,22 +245,21 @@ impl DrmBackend {
         })
     }
 
-    /// Disegna lo sfondo a colore pieno con il cursore software sopra
-    /// (solo se `cursor_visible`).
+    /// Disegna il piano del compositor (finestre in ordine z) sopra lo
+    /// sfondo, con il cursore software sopra (solo se il piano lo richiede).
     ///
     /// Restituisce `true` se un frame è stato accodato (e va confermato con
     /// [`DrmBackend::frame_submitted`] al prossimo VBlank), `false` se non
     /// c'era niente da ridisegnare (nessun danno).
-    pub fn render(
-        &mut self,
-        cursor_pos: (i32, i32),
-        cursor_visible: bool,
-    ) -> Result<bool, ServerError> {
-        let mut elements = Vec::new();
-        if cursor_visible {
+    pub fn render(&mut self, plan: &FramePlan) -> Result<bool, ServerError> {
+        let mut elements: Vec<OutputRenderElements<GlesRenderer>> = Vec::new();
+        for window in &plan.windows {
+            self.render_window(&mut elements, window)?;
+        }
+        if plan.cursor_visible {
             let cursor_element = MemoryRenderBufferRenderElement::from_buffer(
                 &mut self.renderer,
-                Point::<f64, Physical>::from((cursor_pos.0 as f64, cursor_pos.1 as f64)),
+                Point::<f64, Physical>::from((plan.cursor_pos.0 as f64, plan.cursor_pos.1 as f64)),
                 &self.cursor_buffer,
                 Some(1.0),
                 None,
@@ -225,7 +267,7 @@ impl DrmBackend {
                 Kind::Cursor,
             )
             .map_err(|e| ServerError::Drm(format!("elemento cursore: {e}")))?;
-            elements.push(cursor_element);
+            elements.push(OutputRenderElements::Memory(cursor_element));
         }
         let result = self
             .compositor
@@ -244,6 +286,83 @@ impl DrmBackend {
             .queue_frame(())
             .map_err(|e| ServerError::Drm(format!("queue_frame: {e}")))?;
         Ok(true)
+    }
+
+    /// Aggiunge gli elementi di una finestra: bordo di focus (2 px) dietro
+    /// tutto, contenuto (texture o segnaposto scuro) e barra del titolo
+    /// (24 px, colore diverso se focus).
+    fn render_window(
+        &mut self,
+        elements: &mut Vec<OutputRenderElements<GlesRenderer>>,
+        window: &FrameWindow,
+    ) -> Result<(), ServerError> {
+        let geo = window.geometry;
+        if window.focused {
+            let border = SolidColorBuffer::new(
+                (
+                    geo.width as i32 + 2 * FOCUS_BORDER_WIDTH,
+                    geo.height as i32 + 2 * FOCUS_BORDER_WIDTH,
+                ),
+                FOCUS_BORDER,
+            );
+            elements.push(OutputRenderElements::Solid(
+                SolidColorRenderElement::from_buffer(
+                    &border,
+                    Point::from((geo.x - FOCUS_BORDER_WIDTH, geo.y - FOCUS_BORDER_WIDTH)),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                ),
+            ));
+        }
+        let content = window.content_rect();
+        match &window.content {
+            Some(buffer) => {
+                let element = MemoryRenderBufferRenderElement::from_buffer(
+                    &mut self.renderer,
+                    Point::<f64, Physical>::from((content.x as f64, content.y as f64)),
+                    buffer,
+                    Some(1.0),
+                    None,
+                    Some(Size::from((content.width as i32, content.height as i32))),
+                    Kind::Unspecified,
+                )
+                .map_err(|e| ServerError::Drm(format!("elemento contenuto: {e}")))?;
+                elements.push(OutputRenderElements::Memory(element));
+            }
+            None => {
+                let placeholder = SolidColorBuffer::new(
+                    (content.width as i32, content.height as i32),
+                    PLACEHOLDER,
+                );
+                elements.push(OutputRenderElements::Solid(
+                    SolidColorRenderElement::from_buffer(
+                        &placeholder,
+                        Point::from((content.x, content.y)),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    ),
+                ));
+            }
+        }
+        let title = window.title_bar_rect();
+        let color = if window.focused {
+            TITLE_FOCUSED
+        } else {
+            TITLE_UNFOCUSED
+        };
+        let title_buffer = SolidColorBuffer::new((title.width as i32, title.height as i32), color);
+        elements.push(OutputRenderElements::Solid(
+            SolidColorRenderElement::from_buffer(
+                &title_buffer,
+                Point::from((title.x, title.y)),
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            ),
+        ));
+        Ok(())
     }
 
     /// Conferma che il frame accodato è stato presentato (dopo VBlank).
@@ -389,7 +508,14 @@ pub fn dry_run(seat: &str) -> Result<(), ServerError> {
     println!("[..] /dev/dri presente: {}", Path::new("/dev/dri").exists());
     println!("[..] socket IPC: {:?}", zahidex_ipc::default_socket_path());
     println!("[..] sfondo: #0B1D33, renderer GlesRenderer su GBM (Smithay 0.7)");
+    println!(
+        "[..] compositor: tiling master 60% + stack, floating, barra titolo 24 px, bordo focus 2 px"
+    );
     println!("[..] cursore: freccia software 16x16; uscita: Ctrl+C, Ctrl+Alt+BackSpace, Super+Q");
+    println!(
+        "[..] scorciatoie finestre: Super+J/K ciclo focus, Super+F tiling<->floating, Super+Q chiude"
+    );
+    println!("[..] client di test: ./target/release/zahidex-test-client [secondi]");
     println!("dry-run completato.");
     Ok(())
 }

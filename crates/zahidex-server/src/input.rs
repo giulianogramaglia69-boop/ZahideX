@@ -25,7 +25,9 @@ use smithay::backend::session::{AsErrno, Session, libseat::LibSeatSession};
 use tracing::{debug, info};
 use zahidex_protocol::{ServerMessage, WindowId, modifiers};
 
+use crate::compositor::Outbound;
 use crate::error::ServerError;
+use crate::focus::ClientId;
 use crate::keymap::TranslatedKey;
 use crate::server::Zahidex;
 
@@ -121,9 +123,12 @@ pub fn to_protocol_axis(axis: Axis) -> zahidex_protocol::Axis {
 /// Ctrl+Alt+BackSpace oppure Super+Q.
 fn is_exit_shortcut(t: &TranslatedKey) -> bool {
     let ctrl_alt = modifiers::CTRL | modifiers::ALT;
-    (t.keysym == 0xff08 && t.modifiers & ctrl_alt == ctrl_alt)
-        || ((t.keysym == 0x71 || t.keysym == 0x51)
-            && t.modifiers & modifiers::SUPER == modifiers::SUPER)
+    (t.keysym == 0xff08 && t.modifiers & ctrl_alt == ctrl_alt) || is_super_q(t)
+}
+
+/// `true` se il tasto è Super+Q (minuscola o maiuscola).
+fn is_super_q(t: &TranslatedKey) -> bool {
+    (t.keysym == 0x71 || t.keysym == 0x51) && t.modifiers & modifiers::SUPER == modifiers::SUPER
 }
 
 impl Zahidex {
@@ -132,6 +137,190 @@ impl Zahidex {
     fn send_to_focused(&self, msg: ServerMessage) {
         if !self.focus.send_to_focused(msg) {
             debug!("input: nessun client focalizzato, evento scartato");
+        }
+    }
+
+    /// Invia i messaggi in uscita ai client destinatari.
+    fn send_outbounds(&self, out: Vec<Outbound>) {
+        for (target, msg) in out {
+            let _ = self.focus.send_to_client(target, msg);
+        }
+    }
+
+    /// Finestra focalizzata e suo proprietario, se ce n'è una.
+    fn focused_target(&self) -> Option<(ClientId, WindowId)> {
+        let comp = self.compositor.lock().expect("compositor avvelenato");
+        let id = comp.focused_id()?;
+        comp.owner_of(id).map(|owner| (owner, id))
+    }
+
+    /// Chiude la finestra focalizzata (Super+Q). Restituisce `true` se
+    /// c'era una finestra da chiudere.
+    fn close_focused_window(&mut self) -> bool {
+        let out = {
+            let mut comp = self.compositor.lock().expect("compositor avvelenato");
+            comp.close_focused()
+        };
+        if out.is_empty() {
+            return false;
+        }
+        self.needs_redraw = true;
+        self.send_outbounds(out);
+        true
+    }
+
+    /// Cicla il focus tra le finestre (`direction` +1 avanti, -1 indietro).
+    fn cycle_focus(&mut self, direction: i32) {
+        let out = {
+            let mut comp = self.compositor.lock().expect("compositor avvelenato");
+            comp.cycle_focus(direction)
+        };
+        if !out.is_empty() {
+            self.needs_redraw = true;
+            self.send_outbounds(out);
+        }
+    }
+
+    /// Passa la finestra focalizzata da tiling a floating e viceversa.
+    fn toggle_floating_focused(&mut self) {
+        let out = {
+            let mut comp = self.compositor.lock().expect("compositor avvelenato");
+            comp.toggle_floating_focused()
+        };
+        if !out.is_empty() {
+            self.needs_redraw = true;
+            self.send_outbounds(out);
+        }
+    }
+
+    /// Finestra sotto il cursore (id, proprietario, geometria), se ce n'è
+    /// una. Serve a inoltrare gli eventi del pointer alla finestra giusta.
+    fn hovered_target(&self) -> Option<(WindowId, ClientId, zahidex_protocol::Rect)> {
+        let id = self.hovered?;
+        let comp = self.compositor.lock().expect("compositor avvelenato");
+        let window = comp.window(id)?;
+        Some((id, window.owner, window.geometry))
+    }
+
+    /// Aggiorna la finestra sotto il cursore e invia PointerEnter/Leave
+    /// quando cambia.
+    fn update_hover(&mut self, x: i32, y: i32) {
+        let hovered = {
+            let comp = self.compositor.lock().expect("compositor avvelenato");
+            comp.hit_test(x, y)
+        };
+        if hovered == self.hovered {
+            return;
+        }
+        let old = self.hovered;
+        self.hovered = hovered;
+        let comp = self.compositor.lock().expect("compositor avvelenato");
+        if let Some(old_id) = old
+            && let Some(owner) = comp.owner_of(old_id)
+        {
+            let _ = self
+                .focus
+                .send_to_client(owner, ServerMessage::PointerLeave { window_id: old_id });
+        }
+        if let Some(new_id) = hovered
+            && let Some(owner) = comp.owner_of(new_id)
+        {
+            let _ = self
+                .focus
+                .send_to_client(owner, ServerMessage::PointerEnter { window_id: new_id });
+        }
+    }
+
+    /// Il cursore si è mosso (la posizione è già aggiornata): aggiorna il
+    /// drag in corso, l'hover e inoltra PointerMotion alla finestra sotto
+    /// il cursore (coordinate relative all'origine della finestra).
+    fn pointer_moved(&mut self) {
+        let (x, y) = self.cursor.position();
+        let dragged = {
+            let mut comp = self.compositor.lock().expect("compositor avvelenato");
+            comp.drag_to(x, y)
+        };
+        if dragged {
+            self.needs_redraw = true;
+        }
+        self.update_hover(x, y);
+        if let Some((id, owner, geo)) = self.hovered_target() {
+            let _ = self.focus.send_to_client(
+                owner,
+                ServerMessage::PointerMotion {
+                    window_id: id,
+                    x: x - geo.x,
+                    y: y - geo.y,
+                },
+            );
+        }
+    }
+
+    /// Pressione di un pulsante (la posizione del cursore è quella
+    /// corrente): click sinistro = focus + eventuale inizio drag.
+    fn pointer_pressed(&mut self, button: u32) {
+        let (x, y) = self.cursor.position();
+        if button == BTN_LEFT {
+            let out = {
+                let mut comp = self.compositor.lock().expect("compositor avvelenato");
+                comp.begin_drag(x, y)
+            };
+            if !out.is_empty() {
+                self.needs_redraw = true;
+                self.send_outbounds(out);
+            }
+            self.update_hover(x, y);
+        }
+        if let Some((id, owner, _)) = self.hovered_target() {
+            let _ = self.focus.send_to_client(
+                owner,
+                ServerMessage::PointerButton {
+                    window_id: id,
+                    button,
+                    pressed: true,
+                },
+            );
+        }
+    }
+
+    /// Rilascio di un pulsante: chiude il drag in corso (e conferma la
+    /// geometria finale al client) e inoltra il rilascio.
+    fn pointer_released(&mut self, button: u32) {
+        if button == BTN_LEFT {
+            let ended = {
+                let mut comp = self.compositor.lock().expect("compositor avvelenato");
+                comp.end_drag()
+            };
+            if let Some((id, geo)) = ended {
+                self.needs_redraw = true;
+                if let Some(owner) = self
+                    .compositor
+                    .lock()
+                    .expect("compositor avvelenato")
+                    .owner_of(id)
+                {
+                    let _ = self.focus.send_to_client(
+                        owner,
+                        ServerMessage::Configure {
+                            window_id: id,
+                            width: geo.width,
+                            height: geo.height,
+                        },
+                    );
+                }
+            }
+            let (x, y) = self.cursor.position();
+            self.update_hover(x, y);
+        }
+        if let Some((id, owner, _)) = self.hovered_target() {
+            let _ = self.focus.send_to_client(
+                owner,
+                ServerMessage::PointerButton {
+                    window_id: id,
+                    button,
+                    pressed: false,
+                },
+            );
         }
     }
 
@@ -165,39 +354,76 @@ impl Zahidex {
                     translated.keysym, translated.keysym_name, translated.modifiers
                 );
                 if pressed && is_exit_shortcut(&translated) {
-                    info!("scorciatoia di uscita, spengo il server");
+                    if is_super_q(&translated) {
+                        // Super+Q chiude la finestra con focus; solo se
+                        // non c'è nessuna finestra chiude il server (come
+                        // in Fase 3). Ctrl+Alt+BackSpace esce sempre.
+                        if self.close_focused_window() {
+                            return;
+                        }
+                        info!("Super+Q senza finestre: spengo il server");
+                    } else {
+                        info!("scorciatoia di uscita, spengo il server");
+                    }
                     self.exit_requested = true;
                     return;
                 }
-                self.send_to_focused(ServerMessage::Key {
-                    window_id: OUTPUT_WINDOW,
-                    keycode: evdev,
-                    pressed,
-                    keysym: translated.keysym,
-                    modifiers: translated.modifiers,
-                });
+                if pressed && translated.modifiers & modifiers::SUPER == modifiers::SUPER {
+                    match translated.keysym {
+                        // Super+J / Super+K: ciclo del focus tra finestre.
+                        0x6a | 0x4a => {
+                            self.cycle_focus(1);
+                            return;
+                        }
+                        0x6b | 0x4b => {
+                            self.cycle_focus(-1);
+                            return;
+                        }
+                        // Super+F: tiling <-> floating per la finestra focalizzata.
+                        0x66 | 0x46 => {
+                            self.toggle_floating_focused();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Inoltro alla finestra focalizzata; se non c'è nessuna
+                // finestra, al client focalizzato (Fase 3).
+                match self.focused_target() {
+                    Some((owner, id)) => {
+                        let _ = self.focus.send_to_client(
+                            owner,
+                            ServerMessage::Key {
+                                window_id: id,
+                                keycode: evdev,
+                                pressed,
+                                keysym: translated.keysym,
+                                modifiers: translated.modifiers,
+                            },
+                        );
+                    }
+                    None => {
+                        self.send_to_focused(ServerMessage::Key {
+                            window_id: OUTPUT_WINDOW,
+                            keycode: evdev,
+                            pressed,
+                            keysym: translated.keysym,
+                            modifiers: translated.modifiers,
+                        });
+                    }
+                }
             }
             InputEvent::PointerMotion { event } => {
                 self.cursor.move_relative(event.delta_x(), event.delta_y());
                 self.needs_redraw = true;
-                let (x, y) = self.cursor.position();
-                self.send_to_focused(ServerMessage::PointerMotion {
-                    window_id: OUTPUT_WINDOW,
-                    x,
-                    y,
-                });
+                self.pointer_moved();
             }
             InputEvent::PointerMotionAbsolute { event } => {
                 let x = event.x_transformed(self.output_size.0 as i32);
                 let y = event.y_transformed(self.output_size.1 as i32);
                 self.cursor.move_absolute(x, y);
                 self.needs_redraw = true;
-                let (x, y) = self.cursor.position();
-                self.send_to_focused(ServerMessage::PointerMotion {
-                    window_id: OUTPUT_WINDOW,
-                    x,
-                    y,
-                });
+                self.pointer_moved();
             }
             InputEvent::PointerButton { event } => {
                 let pressed = event.state() == ButtonState::Pressed;
@@ -206,11 +432,11 @@ impl Zahidex {
                     "pointer: pulsante {code:#x} {}",
                     if pressed { "premuto" } else { "rilasciato" }
                 );
-                self.send_to_focused(ServerMessage::PointerButton {
-                    window_id: OUTPUT_WINDOW,
-                    button: code,
-                    pressed,
-                });
+                if pressed {
+                    self.pointer_pressed(code);
+                } else {
+                    self.pointer_released(code);
+                }
             }
             InputEvent::PointerAxis { event } => {
                 for axis in [Axis::Vertical, Axis::Horizontal] {
@@ -218,12 +444,17 @@ impl Zahidex {
                     let delta_px = event.amount(axis);
                     if delta_v120.is_some() || delta_px.is_some() {
                         debug!("pointer: scroll {axis:?} v120={delta_v120:?} px={delta_px:?}");
-                        self.send_to_focused(ServerMessage::PointerAxis {
-                            window_id: OUTPUT_WINDOW,
-                            axis: to_protocol_axis(axis),
-                            delta_v120,
-                            delta_px,
-                        });
+                        if let Some((id, owner, _)) = self.hovered_target() {
+                            let _ = self.focus.send_to_client(
+                                owner,
+                                ServerMessage::PointerAxis {
+                                    window_id: id,
+                                    axis: to_protocol_axis(axis),
+                                    delta_v120,
+                                    delta_px,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -233,36 +464,17 @@ impl Zahidex {
                 let y = event.y_transformed(self.output_size.1 as i32);
                 self.cursor.move_absolute(x, y);
                 self.needs_redraw = true;
-                let (x, y) = self.cursor.position();
-                self.send_to_focused(ServerMessage::PointerMotion {
-                    window_id: OUTPUT_WINDOW,
-                    x,
-                    y,
-                });
-                self.send_to_focused(ServerMessage::PointerButton {
-                    window_id: OUTPUT_WINDOW,
-                    button: BTN_LEFT,
-                    pressed: true,
-                });
+                self.pointer_pressed(BTN_LEFT);
             }
             InputEvent::TouchMotion { event } => {
                 let x = event.x_transformed(self.output_size.0 as i32);
                 let y = event.y_transformed(self.output_size.1 as i32);
                 self.cursor.move_absolute(x, y);
                 self.needs_redraw = true;
-                let (x, y) = self.cursor.position();
-                self.send_to_focused(ServerMessage::PointerMotion {
-                    window_id: OUTPUT_WINDOW,
-                    x,
-                    y,
-                });
+                self.pointer_moved();
             }
             InputEvent::TouchUp { .. } | InputEvent::TouchCancel { .. } => {
-                self.send_to_focused(ServerMessage::PointerButton {
-                    window_id: OUTPUT_WINDOW,
-                    button: BTN_LEFT,
-                    pressed: false,
-                });
+                self.pointer_released(BTN_LEFT);
             }
             _ => {
                 debug!("input: evento non gestito (gesto/tablet/switch)");

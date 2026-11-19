@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `zahidex` — server grafico ZahideX.
 //!
-//! Fase 3: accende lo schermo via DRM/KMS e disegna uno sfondo a colore
-//! pieno con GlesRenderer (Smithay 0.7, solo backend), con input libinput
-//! (tastiera con keymap xkb italiana, pointer, touch) e cursore software.
-//! Accetta client IPC: handshake + inoltro degli eventi di input al client
-//! focalizzato (le finestre arrivano in Fase 4).
+//! Fase 4: compositor di finestre (tiling + floating).
+//!
+//! Accende lo schermo via DRM/KMS e disegna le finestre dei client con
+//! GlesRenderer (Smithay 0.7, solo backend): layout tiling (master 60% +
+//! stack) e floating, barra del titolo 24 px, bordo di focus 2 px, focus
+//! per-finestra, drag della barra del titolo. Input libinput (tastiera con
+//! keymap xkb italiana, pointer, touch) e cursore software.
 //!
 //! Avvio (sul laptop, da una TTY libera):
 //! ```sh
 //! cargo build --release -p zahidex-server
 //! ./target/release/zahidex
 //! ```
-//! Uscita: Ctrl+C, SIGTERM, Ctrl+Alt+BackSpace o Super+Q — il server
-//! rilascia DRM master e sessione, e logind ripristina la TTY precedente.
+//! Uscita: Ctrl+C, SIGTERM, Ctrl+Alt+BackSpace o Super+Q senza finestre —
+//! il server rilascia DRM master e sessione, e logind ripristina la TTY
+//! precedente. Super+Q con finestre chiude la finestra con focus.
 
 mod backend;
+mod compositor;
 mod cursor;
 mod error;
 mod focus;
@@ -28,6 +32,7 @@ mod server;
 
 use std::process::ExitCode;
 
+use crate::compositor::Compositor;
 use crate::error::ServerError;
 use crate::focus::FocusRegistry;
 use crate::keymap::DEFAULT_LAYOUT;
@@ -35,7 +40,7 @@ use crate::keymap::DEFAULT_LAYOUT;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_help() {
-    println!("zahidex {VERSION} — server grafico ZahideX (Fase 3)");
+    println!("zahidex {VERSION} — server grafico ZahideX (Fase 4)");
     println!();
     println!("Uso: zahidex [opzioni]");
     println!();
@@ -48,7 +53,9 @@ fn print_help() {
     println!();
     println!("Avvio normale: da una TTY libera (Ctrl+Alt+F3), mai da SSH o da");
     println!("dentro un altro ambiente grafico. Uscita: Ctrl+C, Ctrl+Alt+BackSpace");
-    println!("o Super+Q. Log: stdout (imposta RUST_LOG=debug per i log di Smithay).");
+    println!("o Super+Q senza finestre. Scorciatoie finestre: Super+J/K ciclo focus,");
+    println!("Super+F tiling<->floating, Super+Q chiude la finestra con focus.");
+    println!("Log: stdout (imposta RUST_LOG=debug per i log di Smithay).");
 }
 
 fn init_logging() {
@@ -123,12 +130,23 @@ fn run(dry_run: bool, seat: &str, layout: &str) -> Result<(), ServerError> {
     let parts = crate::backend::DrmBackend::open(seat)?;
     let output_size = parts.backend.output_size;
     let focus = FocusRegistry::new_shared();
-    crate::ipc::start_ipc(output_size, std::sync::Arc::clone(&focus))?;
-    let server = crate::server::Zahidex::new(parts.backend, focus, layout)?;
+    let compositor = std::sync::Arc::new(std::sync::Mutex::new(Compositor::new(
+        output_size.0,
+        output_size.1,
+    )));
+    let (wake_tx, wake_rx) = calloop::channel::channel();
+    crate::ipc::start_ipc(
+        output_size,
+        std::sync::Arc::clone(&focus),
+        std::sync::Arc::clone(&compositor),
+        wake_tx,
+    )?;
+    let server = crate::server::Zahidex::new(parts.backend, focus, compositor, layout)?;
     server.run(
         parts.drm_notifier,
         parts.session_notifier,
         parts.udev_backend,
         parts.input_backend,
+        wake_rx,
     )
 }

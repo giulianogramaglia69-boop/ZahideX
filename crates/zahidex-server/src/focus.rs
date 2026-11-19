@@ -72,6 +72,7 @@ impl FocusRegistry {
     }
 
     /// Quanti client sono connessi.
+    #[cfg(test)]
     #[must_use]
     pub fn client_count(&self) -> usize {
         self.inner
@@ -79,6 +80,26 @@ impl FocusRegistry {
             .expect("focus registry avvelenato")
             .order
             .len()
+    }
+
+    /// Invia un messaggio a un client specifico. Restituisce `false` se
+    /// il client non esiste o il canale è chiuso (in quel caso il client
+    /// viene rimosso dal registro).
+    pub fn send_to_client(&self, id: ClientId, msg: ServerMessage) -> bool {
+        let tx = {
+            let inner = self.inner.lock().expect("focus registry avvelenato");
+            match inner.senders.get(&id) {
+                Some(tx) => tx.clone(),
+                None => return false,
+            }
+        };
+        match tx.send(msg) {
+            Ok(()) => true,
+            Err(_) => {
+                self.unregister(id);
+                false
+            }
+        }
     }
 
     /// Invia un messaggio al client focalizzato. Restituisce `false` se non
@@ -155,6 +176,18 @@ mod tests {
         assert!(!registry.send_to_focused(ServerMessage::Ping));
         assert_eq!(registry.focused(), None);
         assert_eq!(registry.client_count(), 0);
+        let _ = first;
+    }
+
+    #[test]
+    fn send_to_client_delivers_to_specific_client() {
+        let registry = FocusRegistry::default();
+        let (first, rx1) = registry.register();
+        let (second, rx2) = registry.register();
+        assert!(registry.send_to_client(second, ServerMessage::Ping));
+        assert!(rx1.try_recv().is_err());
+        assert_eq!(rx2.try_recv().unwrap(), ServerMessage::Ping);
+        assert!(!registry.send_to_client(ClientId(99), ServerMessage::Ping));
         let _ = first;
     }
 

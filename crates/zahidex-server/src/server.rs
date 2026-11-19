@@ -8,6 +8,7 @@
 //! Uscita pulita (Ctrl+C / SIGTERM): il loop si ferma, i `Drop` rilasciano
 //! DRM master e sessione, e logind ripristina la TTY precedente.
 
+use calloop::channel::{Channel, Event as ChannelEvent};
 use calloop::signals::{Signal, Signals};
 use calloop::{EventLoop, LoopSignal};
 use smithay::backend::{
@@ -16,14 +17,16 @@ use smithay::backend::{
     session::{Event as SessionEvent, libseat::LibSeatSessionNotifier},
     udev::{UdevBackend, UdevEvent},
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{error, info, warn};
 
 use crate::backend::DrmBackend;
+use crate::compositor::Compositor;
 use crate::cursor::Cursor;
 use crate::error::ServerError;
 use crate::focus::FocusRegistry;
 use crate::keymap::Keymap;
+use zahidex_protocol::WindowId;
 
 /// Stato del server nel loop eventi.
 pub struct Zahidex {
@@ -40,6 +43,10 @@ pub struct Zahidex {
     pub(crate) cursor: Cursor,
     /// Client connessi e focus (condiviso con i thread IPC).
     pub(crate) focus: Arc<FocusRegistry>,
+    /// Registro finestre e layout (condiviso con i thread IPC).
+    pub(crate) compositor: Arc<Mutex<Compositor>>,
+    /// Finestra sotto il cursore (None se è sullo sfondo).
+    pub(crate) hovered: Option<WindowId>,
     /// Dimensioni dell'output in pixel (per clamp del cursore e mapping assoluto).
     pub(crate) output_size: (u32, u32),
     /// `true` quando una scorciatoia di uscita (Ctrl+Alt+BackSpace, Super+Q)
@@ -51,6 +58,7 @@ impl Zahidex {
     pub fn new(
         backend: DrmBackend,
         focus: Arc<FocusRegistry>,
+        compositor: Arc<Mutex<Compositor>>,
         layout: &str,
     ) -> Result<Self, ServerError> {
         let output_size = backend.output_size;
@@ -62,19 +70,23 @@ impl Zahidex {
             needs_redraw: true,
             frame_queued: false,
             focus,
+            compositor,
+            hovered: None,
             output_size,
             exit_requested: false,
         })
     }
 
     /// Entra nel loop eventi. Ritorna solo all'uscita pulita o in caso di
-    /// errore del loop.
+    /// errore del loop. `wake_rx` è il canale con cui i thread IPC
+    /// chiedono un ridisegno (commit, focus, layout, disconnessione).
     pub fn run(
         mut self,
         drm_notifier: DrmDeviceNotifier,
         session_notifier: LibSeatSessionNotifier,
         udev_backend: UdevBackend,
         input_backend: LibinputInputBackend,
+        wake_rx: Channel<()>,
     ) -> Result<(), ServerError> {
         let mut event_loop =
             EventLoop::<Self>::try_new().map_err(|e| ServerError::EventLoop(e.to_string()))?;
@@ -166,6 +178,16 @@ impl Zahidex {
             )
             .map_err(|e| ServerError::EventLoop(e.to_string()))?;
 
+        // Risveglio dai thread IPC: commit, focus, layout, disconnessione.
+        event_loop
+            .handle()
+            .insert_source(wake_rx, |event, _, state: &mut Self| {
+                if let ChannelEvent::Msg(()) = event {
+                    state.needs_redraw = true;
+                }
+            })
+            .map_err(|e| ServerError::EventLoop(e.to_string()))?;
+
         info!("zahidex in esecuzione (Ctrl+C, Ctrl+Alt+BackSpace o Super+Q per uscire)");
         let stop_on_exit = loop_signal.clone();
         event_loop
@@ -176,9 +198,11 @@ impl Zahidex {
                     return;
                 }
                 if state.needs_redraw && !state.paused {
-                    let cursor_pos = state.cursor.position();
-                    let cursor_visible = state.cursor.visible();
-                    match state.backend.render(cursor_pos, cursor_visible) {
+                    let plan = {
+                        let comp = state.compositor.lock().expect("compositor avvelenato");
+                        comp.frame_plan(state.cursor.position(), state.cursor.visible())
+                    };
+                    match state.backend.render(&plan) {
                         Ok(queued) => {
                             state.frame_queued = queued;
                             state.needs_redraw = false;
@@ -187,7 +211,7 @@ impl Zahidex {
                             // Non uscire: un frame fallito non deve uccidere
                             // il server (il prossimo giro riprova solo se
                             // qualcosa lo richiede).
-                            error!("render dello sfondo fallito: {e}");
+                            error!("render delle finestre fallito: {e}");
                             state.needs_redraw = false;
                         }
                     }

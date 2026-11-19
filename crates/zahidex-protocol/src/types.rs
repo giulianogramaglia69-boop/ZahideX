@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use serde::{Deserialize, Serialize};
 
+/// Altezza della barra del titolo di una finestra (px, parte del
+/// protocollo: il client sottrae questo valore dall'altezza della finestra
+/// per ottenere l'area di contenuto).
+pub const TITLE_BAR_HEIGHT: u32 = 24;
+
 /// Asse di scorrimento (rotella / trackpad).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {

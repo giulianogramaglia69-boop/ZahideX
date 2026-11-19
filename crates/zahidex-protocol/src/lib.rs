@@ -23,5 +23,5 @@ mod version;
 pub use error::ProtocolError;
 pub use framing::{FrameDecoder, MAGIC, MAX_FRAME_BYTES, decode_frame, encode_frame};
 pub use messages::{ClientMessage, ServerMessage};
-pub use types::{Axis, BufferInfo, PixelFormat, Rect, WindowId, modifiers};
+pub use types::{Axis, BufferInfo, PixelFormat, Rect, TITLE_BAR_HEIGHT, WindowId, modifiers};
 pub use version::{PROTOCOL_VERSION, SUPPORTED_VERSIONS, negotiate_version};

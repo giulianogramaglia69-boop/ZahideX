@@ -14,7 +14,11 @@ Target: laptop Fedora con GPU AMD, lanciato da TTY via logind (niente root).
 - [x] **Fase 3 — Input libinput + focus** (`zahidex-server`: tastiera
       xkb italiana, pointer/touch, cursore software, focus al primo client;
       16 test nuovi)
-- [ ] Fase 4 — Compositor (tiling + floating)
+- [x] **Fase 4 — Compositor (tiling + floating)** (`zahidex-server`:
+      registro finestre, layout tiling master 60% + stack, floating con
+      drag della barra del titolo e resize dai bordi, focus per-finestra,
+      scorciatoie Super+J/K/F/Q, rendering con barre del titolo e bordo
+      di focus; client di test `zahidex-test-client`; 22 test nuovi)
 - [ ] Fase 5 — Client library + client demo
 
 ## Architettura
@@ -189,6 +193,77 @@ Senza client connessi gli eventi tastiera finiscono solo nel log: per
 vederli arrivare a un client serve la libreria client della Fase 5 (o un
 client di test che fa handshake sul socket `$XDG_RUNTIME_DIR/zahidex-0`).
 Il cursore invece si muove anche senza client.
+
+## Fase 4 — Compositor (fatta)
+
+`crates/zahidex-server/src/compositor.rs`: logica pura (niente DRM, niente
+I/O) — registro finestre, layout, focus, drag, hit-test. Il rendering vive
+in `backend.rs`, lo smistamento dei messaggi in `ipc.rs` / `input.rs`.
+
+- **Layout tiling (default)**: master a sinistra (60% della larghezza) +
+  stack a destra diviso in parti uguali in verticale; una sola finestra
+  occupa tutto l'output. Il layout si rifà a ogni creazione, distruzione e
+  cambio floating; il server invia `Configure` ai client la cui geometria
+  cambia.
+- **Floating**: `SetFloating=true` (o Super+F) sposta la finestra sopra le
+  tiled; posizione iniziale centrata, dimensione iniziale 800×600 (o metà
+  output se più piccolo) — in v0.1 la dimensione richiesta in
+  `CreateWindow` è quella iniziale. Drag dalla barra del titolo per
+  spostarla, resize dai bordi destro/inferiore e dall'angolo in basso a
+  destra (8 px). La floating focalizzata sale in cima allo z-order.
+- **Rendering**: buffer dei client (texture da memfd XRGB8888) sopra lo
+  sfondo #0B1D33, in ordine z (tiled sotto, floating sopra, focus in cima
+  tra le floating); barra del titolo 24 px (blu #2563EB con focus, grigia
+  #334155 senza — senza testo per ora); bordo di 2 px #0A84FF sulla
+  finestra con focus; segnaposto scuro #16283D se la finestra non ha ancora
+  committato un buffer. Ridisegno a ogni commit, focus, layout, movimento
+  cursore o drag.
+- **Focus per-finestra**: click su una finestra → focus a lei (hit-test:
+  floating sopra tiled, barra del titolo inclusa); la tastiera va alla
+  finestra con focus; il pointer va alla finestra sotto il cursore
+  (coordinate relative all'origine della finestra). Super+J / Super+K
+  ciclano il focus; Super+F passa la finestra con focus da tiling a
+  floating e viceversa; Super+Q chiude la finestra con focus (se non c'è
+  nessuna finestra, chiude il server come in Fase 3; Ctrl+Alt+BackSpace
+  esce sempre).
+- **Protocollo**: `TITLE_BAR_HEIGHT = 24` ora è una costante pubblica del
+  protocollo (`zahidex_protocol::TITLE_BAR_HEIGHT`): il client la sottrae
+  dall'altezza della finestra per ottenere l'area di contenuto del buffer.
+
+### Provare il compositor sul laptop (Fase 4)
+
+```sh
+# 1. Compila (serve Rust 1.88+ e le librerie di sviluppo: libseat-devel,
+#    libgbm-devel, libEGL-devel, libudev-devel, libinput-devel, wayland-devel)
+cargo build --release
+
+# 2. Su una TTY libera (Ctrl+Alt+F3), lancia il server:
+./target/release/zahidex
+
+# 3. Da un'altra TTY (o da SSH, il client non tocca il video), lancia il
+#    client di test: due finestre, una rossa e una verde.
+#    Senza argomenti resta aperto finché non lo chiudi (Ctrl+C);
+#    con un numero, esce da solo dopo quei secondi.
+./target/release/zahidex-test-client
+./target/release/zahidex-test-client 30
+```
+
+Cosa devi vedere:
+
+1. La finestra rossa occupa il 60% sinistro dello schermo, la verde il 40%
+   destro; entrambe hanno la barra del titolo in alto e la rossa (focus)
+   ha il bordo blu.
+2. Click sulla verde → il bordo blu passa a lei. Trascina la sua barra del
+   titolo → non si muove (è in tiling).
+3. Super+F sulla verde → diventa floating, centrata, 800×600 (o metà
+   schermo se più piccolo); ora trascinala dalla barra del titolo e
+   ridimensionala dal bordo destro/inferiore.
+4. Super+J / Super+K → il focus cicla tra le due finestre (bordo blu).
+5. Super+Q → chiude la finestra con focus; l'altra si allarga a tutto lo
+   schermo. Super+Q di nuovo (nessuna finestra) → il server si spegne.
+6. Nel terminale del client vedi i messaggi che arrivano: `Configure`,
+   `Focus`, `PointerEnter/Leave/Motion`, `Key` (prova a scrivere con una
+   finestra focalizzata).
 
 ## Protocollo v0.1
 
