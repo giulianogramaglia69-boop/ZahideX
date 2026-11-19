@@ -12,33 +12,59 @@ use calloop::signals::{Signal, Signals};
 use calloop::{EventLoop, LoopSignal};
 use smithay::backend::{
     drm::{DrmDeviceNotifier, DrmEvent},
+    libinput::LibinputInputBackend,
     session::{Event as SessionEvent, libseat::LibSeatSessionNotifier},
     udev::{UdevBackend, UdevEvent},
 };
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::backend::DrmBackend;
+use crate::cursor::Cursor;
 use crate::error::ServerError;
+use crate::focus::FocusRegistry;
+use crate::keymap::Keymap;
 
 /// Stato del server nel loop eventi.
 pub struct Zahidex {
-    backend: DrmBackend,
+    pub(crate) backend: DrmBackend,
     /// `true` mentre la sessione è in pausa (cambio VT): niente rendering.
-    paused: bool,
+    pub(crate) paused: bool,
     /// `true` quando lo sfondo va ridisegnato al prossimo giro.
-    needs_redraw: bool,
+    pub(crate) needs_redraw: bool,
     /// `true` se un frame è accodato e attende il VBlank.
-    frame_queued: bool,
+    pub(crate) frame_queued: bool,
+    /// Traduttore tasti xkbcommon (layout italiano di default).
+    pub(crate) keymap: Keymap,
+    /// Posizione del cursore software.
+    pub(crate) cursor: Cursor,
+    /// Client connessi e focus (condiviso con i thread IPC).
+    pub(crate) focus: Arc<FocusRegistry>,
+    /// Dimensioni dell'output in pixel (per clamp del cursore e mapping assoluto).
+    pub(crate) output_size: (u32, u32),
+    /// `true` quando una scorciatoia di uscita (Ctrl+Alt+BackSpace, Super+Q)
+    /// ha chiesto lo spegnimento pulito.
+    pub(crate) exit_requested: bool,
 }
 
 impl Zahidex {
-    pub fn new(backend: DrmBackend) -> Self {
-        Self {
+    pub fn new(
+        backend: DrmBackend,
+        focus: Arc<FocusRegistry>,
+        layout: &str,
+    ) -> Result<Self, ServerError> {
+        let output_size = backend.output_size;
+        Ok(Self {
+            keymap: Keymap::new(layout)?,
+            cursor: Cursor::new(output_size.0, output_size.1),
             backend,
             paused: false,
             needs_redraw: true,
             frame_queued: false,
-        }
+            focus,
+            output_size,
+            exit_requested: false,
+        })
     }
 
     /// Entra nel loop eventi. Ritorna solo all'uscita pulita o in caso di
@@ -48,6 +74,7 @@ impl Zahidex {
         drm_notifier: DrmDeviceNotifier,
         session_notifier: LibSeatSessionNotifier,
         udev_backend: UdevBackend,
+        input_backend: LibinputInputBackend,
     ) -> Result<(), ServerError> {
         let mut event_loop =
             EventLoop::<Self>::try_new().map_err(|e| ServerError::EventLoop(e.to_string()))?;
@@ -116,6 +143,15 @@ impl Zahidex {
             )
             .map_err(|e| ServerError::EventLoop(e.to_string()))?;
 
+        // Input libinput: tastiera, pointer, touch (hotplug via
+        // DeviceAdded/DeviceRemoved di libinput).
+        event_loop
+            .handle()
+            .insert_source(input_backend, |event, _, state: &mut Self| {
+                state.handle_input_event(event);
+            })
+            .map_err(|e| ServerError::EventLoop(e.to_string()))?;
+
         // Ctrl+C / SIGTERM -> fermano il loop.
         let stop_on_signal = loop_signal.clone();
         event_loop
@@ -130,11 +166,19 @@ impl Zahidex {
             )
             .map_err(|e| ServerError::EventLoop(e.to_string()))?;
 
-        info!("zahidex in esecuzione (Ctrl+C per uscire)");
+        info!("zahidex in esecuzione (Ctrl+C, Ctrl+Alt+BackSpace o Super+Q per uscire)");
+        let stop_on_exit = loop_signal.clone();
         event_loop
-            .run(None, &mut self, |state| {
+            .run(None, &mut self, move |state| {
+                if state.exit_requested {
+                    info!("uscita richiesta da scorciatoia");
+                    stop_on_exit.stop();
+                    return;
+                }
                 if state.needs_redraw && !state.paused {
-                    match state.backend.render_background() {
+                    let cursor_pos = state.cursor.position();
+                    let cursor_visible = state.cursor.visible();
+                    match state.backend.render(cursor_pos, cursor_visible) {
                         Ok(queued) => {
                             state.frame_queued = queued;
                             state.needs_redraw = false;

@@ -31,7 +31,14 @@ use smithay::backend::{
         exporter::gbm::GbmFramebufferExporter,
     },
     egl::{EGLContext, EGLDisplay},
-    renderer::{element::memory::MemoryRenderBufferRenderElement, gles::GlesRenderer},
+    libinput::LibinputInputBackend,
+    renderer::{
+        element::{
+            Kind,
+            memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+        },
+        gles::GlesRenderer,
+    },
     session::{
         Session,
         libseat::{LibSeatSession, LibSeatSessionNotifier},
@@ -39,10 +46,12 @@ use smithay::backend::{
     udev::{UdevBackend, all_gpus, primary_gpu},
 };
 use smithay::output::{Output, PhysicalProperties, Scale, Subpixel};
-use smithay::utils::{DeviceFd, Size};
+use smithay::utils::{DeviceFd, Physical, Point, Size, Transform};
 use tracing::{debug, info, warn};
 
+use crate::cursor::cursor_image;
 use crate::error::ServerError;
+use crate::input::create_libinput;
 use crate::mode::pick_mode_index;
 
 /// Colore di sfondo: blu scuro `#0B1D33`.
@@ -84,6 +93,8 @@ pub struct DrmBackend {
     pub gpu_path: PathBuf,
     /// dev_t della GPU (per riconoscere la sua rimozione via udev).
     pub gpu_rdev: u64,
+    /// Immagine del cursore software (freccia 16x16, CPU).
+    pub cursor_buffer: MemoryRenderBuffer,
 }
 
 /// Tutto ciò che `DrmBackend::new` costruisce: il backend più le sorgenti
@@ -93,6 +104,7 @@ pub struct BackendParts {
     pub drm_notifier: DrmDeviceNotifier,
     pub session_notifier: LibSeatSessionNotifier,
     pub udev_backend: UdevBackend,
+    pub input_backend: LibinputInputBackend,
 }
 
 impl DrmBackend {
@@ -162,6 +174,15 @@ impl DrmBackend {
             output_size.0, output_size.1
         );
 
+        // Input libinput: la sessione si clona (libseat) e apre i device
+        // /dev/input/event* con i permessi logind.
+        let input_backend = create_libinput(session.clone(), seat)?;
+        info!("input libinput pronto (seat {seat})");
+
+        // Immagine del cursore software (freccia 16x16, buffer CPU).
+        let cursor_buffer =
+            MemoryRenderBuffer::from_memory(cursor_image(), 1, Transform::Normal, None);
+
         Ok(BackendParts {
             backend: DrmBackend {
                 session,
@@ -172,20 +193,40 @@ impl DrmBackend {
                 output_size,
                 gpu_path,
                 gpu_rdev,
+                cursor_buffer,
             },
             drm_notifier,
             session_notifier,
             udev_backend,
+            input_backend,
         })
     }
 
-    /// Disegna lo sfondo a colore pieno.
+    /// Disegna lo sfondo a colore pieno con il cursore software sopra
+    /// (solo se `cursor_visible`).
     ///
     /// Restituisce `true` se un frame è stato accodato (e va confermato con
     /// [`DrmBackend::frame_submitted`] al prossimo VBlank), `false` se non
     /// c'era niente da ridisegnare (nessun danno).
-    pub fn render_background(&mut self) -> Result<bool, ServerError> {
-        let elements: Vec<MemoryRenderBufferRenderElement<GlesRenderer>> = Vec::new();
+    pub fn render(
+        &mut self,
+        cursor_pos: (i32, i32),
+        cursor_visible: bool,
+    ) -> Result<bool, ServerError> {
+        let mut elements = Vec::new();
+        if cursor_visible {
+            let cursor_element = MemoryRenderBufferRenderElement::from_buffer(
+                &mut self.renderer,
+                Point::<f64, Physical>::from((cursor_pos.0 as f64, cursor_pos.1 as f64)),
+                &self.cursor_buffer,
+                Some(1.0),
+                None,
+                None,
+                Kind::Cursor,
+            )
+            .map_err(|e| ServerError::Drm(format!("elemento cursore: {e}")))?;
+            elements.push(cursor_element);
+        }
         let result = self
             .compositor
             .render_frame(
@@ -302,9 +343,11 @@ fn setup_output(device: &mut DrmDevice) -> Result<(Output, DrmSurface, (u32, u32
 /// non un test pass/fail.
 pub fn dry_run(seat: &str) -> Result<(), ServerError> {
     println!("zahidex --dry-run: controllo i prerequisiti (non accendo niente)");
+    let mut session = None;
     match LibSeatSession::new() {
-        Ok((session, _)) => {
-            println!("[ok] sessione libseat attiva (seat {})", session.seat())
+        Ok((s, _)) => {
+            println!("[ok] sessione libseat attiva (seat {})", s.seat());
+            session = Some(s);
         }
         Err(e) => {
             println!("[no] sessione libseat: {e}");
@@ -326,9 +369,27 @@ pub fn dry_run(seat: &str) -> Result<(), ServerError> {
         }
         Err(e) => println!("[no] enumerazione udev fallita: {e}"),
     }
+    match session {
+        Some(s) => {
+            let devices = crate::input::list_input_devices(s, seat);
+            if devices.is_empty() {
+                println!("[..] input: nessun dispositivo visto da libinput");
+            } else {
+                println!(
+                    "[ok] input: {} dispositivi visti da libinput:",
+                    devices.len()
+                );
+                for device in devices {
+                    println!("     - {device}");
+                }
+            }
+        }
+        None => println!("[..] input: salto il controllo (serve la sessione libseat)"),
+    }
     println!("[..] /dev/dri presente: {}", Path::new("/dev/dri").exists());
     println!("[..] socket IPC: {:?}", zahidex_ipc::default_socket_path());
     println!("[..] sfondo: #0B1D33, renderer GlesRenderer su GBM (Smithay 0.7)");
+    println!("[..] cursore: freccia software 16x16; uscita: Ctrl+C, Ctrl+Alt+BackSpace, Super+Q");
     println!("dry-run completato.");
     Ok(())
 }

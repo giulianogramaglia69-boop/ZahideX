@@ -11,7 +11,9 @@ Target: laptop Fedora con GPU AMD, lanciato da TTY via logind (niente root).
 - [x] **Fase 2 — Server DRM che accende lo schermo e disegna uno sfondo**
       (`zahidex-server`, binario `zahidex`; 8 test: scelta modo video,
       handshake)
-- [ ] Fase 3 — Input libinput + focus
+- [x] **Fase 3 — Input libinput + focus** (`zahidex-server`: tastiera
+      xkb italiana, pointer/touch, cursore software, focus al primo client;
+      16 test nuovi)
 - [ ] Fase 4 — Compositor (tiling + floating)
 - [ ] Fase 5 — Client library + client demo
 
@@ -96,6 +98,97 @@ Note: non avviare da SSH né da dentro un altro ambiente grafico — serve
 una sessione logind attiva sulla TTY. Se il server si lamenta di
 `NoGpu`, controlla che la sessione sia attiva (`loginctl`) e che il
 seat sia quello giusto (`--seat seat0`).
+
+## Fase 3 — Input libinput + focus (fatta)
+
+Input reale da tastiera, mouse e touch, con focus al client connesso.
+
+- **Backend libinput di Smithay 0.7** (`backend::libinput`), integrato nel
+  loop calloop esistente come sorgente eventi. La sessione libseat apre i
+  device `/dev/input/event*` con i permessi logind (niente root).
+  **Hotplug**: aggiunta/rimozione a caldo via `DeviceAdded`/`DeviceRemoved`
+  di libinput (log con nome e sysname del device).
+- **Deviazione dalle versioni della ricerca**: Smithay 0.7 fissa
+  **`input` 0.9.0** e **`xkbcommon` 0.8.0** (non 0.10 / 0.9 come indicato
+  in `RICERCA_ECOSISTEMA.md`): `LibinputInputBackend::new` prende
+  l'`input` 0.9 e Smithay dipende direttamente da `xkbcommon` 0.8.0, le
+  versioni nuove non coesistono con i suoi tipi. Stessa regola di Smithay
+  0.7 → drm 0.14: le versioni le detta la base, non la ricerca.
+- **Tastiera con xkbcommon**: keycode evdev grezzi (xkb − 8) tradotti con
+  layout **`it`** di default (flag `--layout <nome>`, es. `--layout us`).
+  Ogni evento `Key` porta `keycode` (evdev), `keysym` (u32 xkb) e
+  `modifiers` (bitmask: SHIFT=1, CTRL=2, ALT=4, SUPER=8).
+- **Pointer**: motion relativo (mouse) e assoluto (touch/tablet, mappato
+  sulle dimensioni dell'output), bottoni (codici evdev, es. BTN_LEFT
+  0x110), scroll (`PointerAxis`: `delta_v120` per le rotelle, `delta_px`
+  per lo scroll continuo/dita — esattamente uno dei due è impostato).
+  **Touch**: tap = movimento assoluto + pressione/rilascio BTN_LEFT;
+  gli eventi touch multi-dito oltre il primo sono ignorati in Fase 3.
+- **Cursore software**: freccia 16×16 (bianca con bordo nero, disegnata in
+  CPU come `MemoryBuffer` ABGR8888) renderizzata da GlesRenderer sopra lo
+  sfondo; parte al centro dell'output, si muove con il mouse, si
+  riposiziona con il touch e resta bloccata ai bordi dell'output.
+- **Focus (modello Fase 3, senza finestre)**: il focus è "quale client
+  riceve l'input". Il **primo client connesso è focalizzato** e riceve
+  tutti gli eventi tastiera (`Key`); quando si disconnette, il focus passa
+  al prossimo client connesso e il nuovo focalizzato riceve `Focus {
+  window_id: None }` (la sentinella `WindowId(0)` significa "livello
+  output, nessuna finestra" — le finestre sono Fase 4). Se nessun client è
+  connesso, gli eventi tastiera vanno solo nel log; gli eventi pointer
+  aggiornano comunque il cursore. I client non focalizzati non ricevono
+  eventi di input.
+- **IPC**: i thread client ora svuotano la coda dei messaggi in uscita
+  mentre aspettano il prossimo messaggio, con `wait_readable` (poll, 20 ms)
+  invece di un timeout di lettura che potrebbe scattare a metà frame.
+- **Scorciatoie di uscita** (uscita pulita come Ctrl+C/SIGTERM):
+  **Ctrl+Alt+BackSpace** oppure **Super+Q**. Il server le intercetta
+  prima di inoltrarle al client e si spegne rilasciando DRM master e
+  sessione.
+
+### Protocollo v0.1 — cambiamenti della Fase 3
+
+Tutti compatibili (campi nuovi solo in coda, varianti nuove solo in coda):
+
+- `Key` ha ora `keysym: u32` e `modifiers: u32` (in coda ai campi Fase 1).
+- `ServerMessage` ha la nuova variante `PointerAxis { window_id, axis,
+  delta_v120, delta_px }` (in coda).
+- `modifiers` (modulo in `zahidex-protocol`): costanti SHIFT=1, CTRL=2,
+  ALT=4, SUPER=8.
+- `ServerMessage` deriva solo `PartialEq` (non più `Eq`): `delta_px` è
+  `f64` e `f64` non implementa `Eq`.
+
+### Provare tastiera e mouse sul laptop (Fase 3)
+
+```sh
+# 1. Compila e lancia da una TTY libera (come per la Fase 2):
+./target/release/zahidex --dry-run   # elenca anche i dispositivi input visti
+./target/release/zahidex
+
+# 2. Tastiera: ogni tasto premuto va nel log (RUST_LOG=debug mostra anche
+#    keysym e modificatori). Prova: lettere, Shift+lettera (maiuscola),
+#    Ctrl, Alt, Super — il log mostra la maschera modificatori.
+RUST_LOG=debug ./target/release/zahidex
+
+# 3. Mouse: muovi il mouse — la freccia bianca si sposta sullo sfondo blu.
+#    Rotella: lo scroll arriva come evento PointerAxis (log, nessun effetto
+#    visivo in Fase 3). Click: log del bottone (nessun effetto in Fase 3:
+#    non ci sono finestre da cliccare).
+
+# 4. Touch (se il laptop lo ha): tocca lo schermo — il cursore salta al
+#    punto toccato.
+
+# 5. Uscita: Ctrl+Alt+BackSpace oppure Super+Q (oppure Ctrl+C).
+#    Il server si spegne pulito e torni alla TTY.
+
+# 6. Hotplug: collega/scollega mouse o tastiera USB mentre il server gira —
+#    il log registra "dispositivo input aggiunto/rimosso" e il nuovo device
+#    funziona subito, senza riavvio.
+```
+
+Senza client connessi gli eventi tastiera finiscono solo nel log: per
+vederli arrivare a un client serve la libreria client della Fase 5 (o un
+client di test che fa handshake sul socket `$XDG_RUNTIME_DIR/zahidex-0`).
+Il cursore invece si muove anche senza client.
 
 ## Protocollo v0.1
 

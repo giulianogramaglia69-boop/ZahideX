@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{BufferInfo, Rect, WindowId};
+use crate::types::{Axis, BufferInfo, Rect, WindowId};
 
 /// Messaggi dal client al server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +54,10 @@ pub enum ClientMessage {
 }
 
 /// Messaggi dal server al client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Solo `PartialEq` (niente `Eq`): `PointerAxis.delta_px` è un `f64` e
+/// `f64` non implementa `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ServerMessage {
     /// Handshake riuscito: versione scelta e dimensione dell'output.
     HelloOk {
@@ -99,12 +102,21 @@ pub enum ServerMessage {
         pressed: bool,
     },
 
-    /// Tasto tastiera: keycode evdev grezzo e stato. In v0.1 non c'è ancora
-    /// la traduzione in keysym (arriva con xkbcommon in Fase 3).
+    /// Tasto tastiera: keycode evdev grezzo, stato, keysym XKB e maschera
+    /// dei modificatori (`crate::types::modifiers`).
+    ///
+    /// `keysym` è il valore numerico del keysym XKB (es. `0x61` per 'a',
+    /// `0xff08` per BackSpace); `0` significa "nessun keysym" (tasto non
+    /// mappato nella keymap corrente).
+    ///
+    /// In Fase 3 non ci sono ancora finestre: gli eventi di input usano
+    /// `WindowId(0)` come sentinella "livello output, nessuna finestra".
     Key {
         window_id: WindowId,
         keycode: u32,
         pressed: bool,
+        keysym: u32,
+        modifiers: u32,
     },
 
     /// Il server chiede al client di chiudere la finestra.
@@ -115,4 +127,17 @@ pub enum ServerMessage {
 
     /// Errore generico (es. id finestra sconosciuto).
     Error { message: String },
+
+    /// Scorrimento su un asse (rotella o trackpad).
+    ///
+    /// Esattamente uno dei due delta è valorizzato: `delta_v120` (in
+    /// centoventesimi di "click", 120 = uno scatto di rotella) per le
+    /// sorgenti a scatti, `delta_px` (pixel, con segno) per le sorgenti
+    /// continue (dita su trackpad).
+    PointerAxis {
+        window_id: WindowId,
+        axis: Axis,
+        delta_v120: Option<i32>,
+        delta_px: Option<f64>,
+    },
 }

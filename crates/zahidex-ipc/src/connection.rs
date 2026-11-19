@@ -87,6 +87,36 @@ impl Connection {
         self.send_with_fds(&msg, &[buffer.as_fd()])
     }
 
+    /// Attende finché lo stream ha dati da leggere (o scade il timeout).
+    ///
+    /// Restituisce `true` se ci sono dati da leggere con `recv`,
+    /// `false` in caso di timeout. Un errore di poll o la chiusura dello
+    /// stream (`POLLHUP`/`POLLERR`) diventano `IpcError`.
+    ///
+    /// Serve ai thread client per svuotare la coda dei messaggi in uscita
+    /// mentre aspettano il prossimo messaggio, senza usare un timeout di
+    /// lettura che potrebbe scattare a metà di un frame.
+    pub fn wait_readable(&self, timeout: Duration) -> Result<bool, IpcError> {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::unix::io::AsFd;
+        let mut fds = [PollFd::new(self.stream.as_fd(), PollFlags::POLLIN)];
+        let millis = timeout.as_millis().min(i32::MAX as u128) as u32;
+        let timeout = PollTimeout::try_from(millis)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let ready = poll(&mut fds, timeout)?;
+        if ready == 0 {
+            return Ok(false);
+        }
+        let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+        if revents.contains(PollFlags::POLLHUP)
+            || revents.contains(PollFlags::POLLERR)
+            || revents.contains(PollFlags::POLLNVAL)
+        {
+            return Err(IpcError::UnexpectedEof);
+        }
+        Ok(revents.contains(PollFlags::POLLIN))
+    }
+
     /// Riceve il prossimo messaggio con gli eventuali fd allegati.
     ///
     /// Gli fd restituiti appartengono a questo messaggio: la lettura avviene

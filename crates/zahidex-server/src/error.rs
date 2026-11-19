@@ -33,6 +33,14 @@ pub enum ServerError {
     #[error("egl/gles: {0}")]
     Gl(String),
 
+    /// Errore libinput (inizializzazione input).
+    #[error("input: {0}")]
+    Input(String),
+
+    /// Errore keymap xkbcommon (layout non caricabile).
+    #[error("tastiera: {0}")]
+    Keymap(String),
+
     /// Errore IPC (socket ZahideX).
     #[error("ipc: {0}")]
     Ipc(#[from] zahidex_ipc::IpcError),

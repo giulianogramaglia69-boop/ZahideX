@@ -190,6 +190,15 @@ mod tests {
                 window_id: WindowId(1),
                 keycode: 30,
                 pressed: true,
+                keysym: 0x61,
+                modifiers: 0,
+            },
+            ServerMessage::Key {
+                window_id: WindowId(1),
+                keycode: 30,
+                pressed: true,
+                keysym: 0x41,
+                modifiers: crate::types::modifiers::SHIFT,
             },
             ServerMessage::CloseWindow {
                 window_id: WindowId(1),
@@ -197,6 +206,18 @@ mod tests {
             ServerMessage::Ping,
             ServerMessage::Error {
                 message: "boom".into(),
+            },
+            ServerMessage::PointerAxis {
+                window_id: WindowId(1),
+                axis: crate::types::Axis::Vertical,
+                delta_v120: Some(120),
+                delta_px: None,
+            },
+            ServerMessage::PointerAxis {
+                window_id: WindowId(1),
+                axis: crate::types::Axis::Horizontal,
+                delta_v120: None,
+                delta_px: Some(-12.5),
             },
         ]
     }

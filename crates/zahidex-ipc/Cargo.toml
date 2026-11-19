@@ -10,5 +10,5 @@ zahidex-protocol = { path = "../zahidex-protocol" }
 serde = { version = "1.0", features = ["derive"] }
 postcard.workspace = true
 thiserror.workspace = true
-nix = { version = "0.30", features = ["socket", "mman", "fs", "uio"] }
+nix = { version = "0.30", features = ["socket", "mman", "fs", "uio", "poll"] }
 memmap2 = "0.9"

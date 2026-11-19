@@ -1,6 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use serde::{Deserialize, Serialize};
 
+/// Asse di scorrimento (rotella / trackpad).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Axis {
+    /// Scorrimento verticale.
+    Vertical,
+    /// Scorrimento orizzontale.
+    Horizontal,
+}
+
+/// Maschera dei modificatori attivi in un evento tastiera (`Key.modifiers`).
+///
+/// Un bit per modificatore; i valori sono stabili (parte del protocollo).
+pub mod modifiers {
+    /// Shift (sinistro o destro).
+    pub const SHIFT: u32 = 1 << 0;
+    /// Control (sinistro o destro).
+    pub const CTRL: u32 = 1 << 1;
+    /// Alt (sinistro o destro).
+    pub const ALT: u32 = 1 << 2;
+    /// Super (tasto Windows / Command).
+    pub const SUPER: u32 = 1 << 3;
+}
+
 /// Identificatore di una finestra, assegnato dal server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u32);

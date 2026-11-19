@@ -21,6 +21,7 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "backend_egl",
     "backend_session_libseat",
     "backend_udev",
+    "backend_libinput",
     "renderer_gl",
     # wayland_frontend NON significa "usiamo Wayland": in Smithay 0.7 il
     # modulo backend::drm::compositor (DrmCompositor) è compilato solo con
@@ -35,5 +36,12 @@ calloop = { version = "0.14", features = ["signals"] }
 drm = "0.14"
 drm-fourcc = "2"
 rustix = { version = "1", features = ["fs"] }
+# input 0.9, non 0.10: Smithay 0.7 dipende da input 0.9.0; la 0.10 è un
+# tipo diverso e `LibinputInputBackend::new` vuole la `Libinput` della 0.9.
+input = "0.9"
+# xkbcommon 0.8, non 0.9: Smithay 0.7 dipende da xkbcommon 0.8.0 e la 0.9
+# non può convivere nello stesso grafo (due major diverse dello stesso
+# crate). L'API usata (Context/Keymap/State) è identica.
+xkbcommon = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

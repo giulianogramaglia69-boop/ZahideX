@@ -399,6 +399,7 @@ dependencies = [
  "bitflags",
  "input-sys",
  "libc",
+ "log",
  "udev",
 ]
 
@@ -1370,11 +1371,14 @@ dependencies = [
  "calloop",
  "drm",
  "drm-fourcc",
+ "input",
+ "libc",
  "rustix 1.1.6",
  "smithay",
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "xkbcommon",
  "zahidex-ipc",
  "zahidex-protocol",
 ]
