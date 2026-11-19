@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Server ZahideX: sessione libseat, DRM/KMS, GBM, renderer GLES, sfondo.
+
+[package]
+name = "zahidex-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Server ZahideX: sessione libseat, DRM/KMS, renderer GLES, sfondo a colore pieno"
+
+[[bin]]
+name = "zahidex"
+path = "src/main.rs"
+
+[dependencies]
+zahidex-protocol = { path = "../zahidex-protocol" }
+zahidex-ipc = { path = "../zahidex-ipc" }
+smithay = { workspace = true }
+calloop = { workspace = true }
+drm = { workspace = true }
+drm-fourcc = { workspace = true }
+rustix = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

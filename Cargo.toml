@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/zahidex-protocol",
+    "crates/zahidex-ipc",
+    "crates/zahidex-server",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.1", features = ["alloc"] }
+thiserror = "2.0"
+smithay = { version = "0.7.0", default-features = false, features = [
+    "backend_drm",
+    "backend_gbm",
+    "backend_egl",
+    "backend_session_libseat",
+    "backend_udev",
+    "renderer_gl",
+    # wayland_frontend NON significa "usiamo Wayland": in Smithay 0.7 il
+    # modulo backend::drm::compositor (DrmCompositor) è compilato solo con
+    # questa feature (serve per lo scan-out diretto dei wl_buffer). Il
+    # protocollo resta il nostro: nessun codice Wayland viene usato.
+    "wayland_frontend",
+] }
+calloop = { version = "0.14", features = ["signals"] }
+# drm 0.14, non 0.15: Smithay 0.7 dipende da drm 0.14; la 0.15 cambierebbe
+# anche i nomi dei metodi (resource_handles -> get_resources) e non è
+# compatibile con i tipi di Smithay 0.7.
+drm = "0.14"
+drm-fourcc = "2"
+rustix = { version = "1", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

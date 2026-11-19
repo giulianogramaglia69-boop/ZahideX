@@ -1,0 +1,11 @@
+[package]
+name = "zahidex-protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Protocollo v0.1 di ZahideX: tipi dei messaggi, framing e negoziazione versione"
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
